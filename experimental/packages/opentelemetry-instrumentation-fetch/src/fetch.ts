@@ -25,7 +25,7 @@ import * as core from '@opentelemetry/core';
 import * as web from '@opentelemetry/sdk-trace-web';
 import { AttributeNames } from './enums/AttributeNames';
 import { SemanticAttributes } from '@opentelemetry/semantic-conventions';
-import { FetchError, FetchResponse, SpanData } from './types';
+import { FetchResponse, SpanData } from './types';
 import { VERSION } from './version';
 import { _globalThis } from '@opentelemetry/core';
 
@@ -39,7 +39,7 @@ export interface FetchCustomAttributeFunction {
   (
     span: api.Span,
     request: Request | RequestInit,
-    result: Response | FetchError
+    result: Response | Error
   ): void;
 }
 
@@ -122,22 +122,61 @@ export class FetchInstrumentation extends InstrumentationBase<
     span: api.Span,
     response: FetchResponse
   ): void {
-    const parsedUrl = web.parseUrl(response.url);
+    this._addContentLengthAttribute(span, response);
     span.setAttribute(SemanticAttributes.HTTP_STATUS_CODE, response.status);
     if (response.statusText != null) {
       span.setAttribute(AttributeNames.HTTP_STATUS_TEXT, response.statusText);
     }
-    span.setAttribute(SemanticAttributes.HTTP_HOST, parsedUrl.host);
-    span.setAttribute(
-      SemanticAttributes.HTTP_SCHEME,
-      parsedUrl.protocol.replace(':', '')
-    );
-    if (typeof navigator !== 'undefined') {
-      span.setAttribute(
-        SemanticAttributes.HTTP_USER_AGENT,
-        navigator.userAgent
-      );
+  }
+
+  /**
+   * Get http.host attribute from url
+   * @param parsedUrl
+   */
+  private _getHostAttribute(
+    parsedUrl: web.URLLike
+  ): string {
+    const portLess = parsedUrl.host.split(":")[1] === undefined;
+    if (portLess) {
+      const inferredPort = parsedUrl.protocol === 'https:' ? '443' : '80';
+      return `${parsedUrl.host}:${inferredPort}`;
     }
+    else return parsedUrl.host;
+  }
+
+  /**
+   * Add content-length attribute to span
+   * @param span
+   * @param response
+   */
+  private _addContentLengthAttribute(
+    span: api.Span,
+    response: FetchResponse
+  ): void {
+    const headers = response.headers;
+    if (!headers) return;
+
+    const contentLengthHeader = headers.get('content-length');
+    if (!contentLengthHeader) return;
+
+    const contentLength = parseInt(contentLengthHeader as string, 10);
+    if (isNaN(contentLength)) return;
+
+    
+    if (this._isCompressed(headers)) {
+      span.setAttribute(SemanticAttributes.HTTP_RESPONSE_CONTENT_LENGTH, contentLength);
+    } else {
+      span.setAttribute(SemanticAttributes.HTTP_RESPONSE_CONTENT_LENGTH_UNCOMPRESSED, contentLength);
+    }
+  }
+
+  /**
+   * Check if response content is compressed 
+   * @param headers
+   */
+  private _isCompressed(headers: Headers) {
+    const encoding = headers.get('content-encoding');
+    return !!encoding && encoding !== 'identity';
   }
 
   /**
@@ -202,13 +241,18 @@ export class FetchInstrumentation extends InstrumentationBase<
       return;
     }
     const method = (options.method || 'GET').toUpperCase();
-    const spanName = `HTTP ${method}`;
+    const spanName = method;
+    const parsedUrl = web.parseUrl(url);
+    const host = this._getHostAttribute(parsedUrl);
+
     return this.tracer.startSpan(spanName, {
       kind: api.SpanKind.CLIENT,
       attributes: {
-        [AttributeNames.COMPONENT]: this.moduleName,
-        [SemanticAttributes.HTTP_METHOD]: method,
         [SemanticAttributes.HTTP_URL]: url,
+        [SemanticAttributes.HTTP_METHOD]: method,
+        [SemanticAttributes.HTTP_TARGET]: parsedUrl.pathname || '/',
+        [SemanticAttributes.NET_PEER_NAME]: parsedUrl.hostname,
+        [SemanticAttributes.HTTP_HOST]: host
       },
     });
   }
@@ -271,6 +315,23 @@ export class FetchInstrumentation extends InstrumentationBase<
   }
 
   /**
+   * Sets the span with the error passed in params
+   * @param span the span that need to be set
+   * @param error error that will be set to span
+   */
+  private _handleSpanWithError(span: api.Span, error: Error): void {
+    const message = error.message;
+
+    span.setAttributes({
+      [AttributeNames.HTTP_ERROR_NAME]: error.name,
+      [AttributeNames.HTTP_ERROR_MESSAGE]: message,
+    });
+
+    span.setStatus({ code: api.SpanStatusCode.ERROR, message });
+    span.recordException(error);
+  };
+
+  /**
    * Finish span, add attributes, network events etc.
    * @param span
    * @param spanData
@@ -279,11 +340,18 @@ export class FetchInstrumentation extends InstrumentationBase<
   private _endSpan(
     span: api.Span,
     spanData: SpanData,
-    response: FetchResponse
+    response?: FetchResponse,
+    error?: Error
   ) {
     const endTime = core.millisToHrTime(Date.now());
     const performanceEndTime = core.hrTime();
-    this._addFinalSpanAttributes(span, response);
+    if (response) {
+      this._addFinalSpanAttributes(span, response);
+    }
+    if (error) {
+      span.setAttributes({"blipblop": "blip"});
+      this._handleSpanWithError(span, error);
+    }
 
     setTimeout(() => {
       spanData.observer?.disconnect();
@@ -316,13 +384,9 @@ export class FetchInstrumentation extends InstrumentationBase<
         }
         const spanData = plugin._prepareSpanData(url);
 
-        function endSpanOnError(span: api.Span, error: FetchError) {
+        function endSpanOnError(span: api.Span, error: Error) {
           plugin._applyAttributesAfterFetch(span, options, error);
-          plugin._endSpan(span, spanData, {
-            status: error.status || 0,
-            statusText: error.message,
-            url,
-          });
+          plugin._endSpan(span, spanData, undefined, error);
         }
 
         function endSpanOnSuccess(span: api.Span, response: Response) {
@@ -333,6 +397,7 @@ export class FetchInstrumentation extends InstrumentationBase<
             plugin._endSpan(span, spanData, {
               status: response.status,
               statusText: response.statusText,
+              headers: response.headers,
               url,
             });
           }
@@ -376,7 +441,7 @@ export class FetchInstrumentation extends InstrumentationBase<
         function onError(
           span: api.Span,
           reject: (reason?: unknown) => void,
-          error: FetchError
+          error: Error
         ) {
           try {
             endSpanOnError(span, error);
@@ -412,7 +477,7 @@ export class FetchInstrumentation extends InstrumentationBase<
   private _applyAttributesAfterFetch(
     span: api.Span,
     request: Request | RequestInit,
-    result: Response | FetchError
+    result: Response | Error
   ) {
     const applyCustomAttributesOnSpan =
       this._getConfig().applyCustomAttributesOnSpan;
