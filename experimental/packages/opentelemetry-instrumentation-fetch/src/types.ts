@@ -23,14 +23,7 @@ export interface FetchResponse {
   status: number;
   statusText?: string;
   url: string;
-}
-
-/**
- * Interface used to provide information to finish span on fetch error
- */
-export interface FetchError {
-  status?: number;
-  message: string;
+  headers?: Headers;
 }
 
 /**

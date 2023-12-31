@@ -15,12 +15,22 @@
     "lint:fix": "eslint . --ext .ts --fix",
     "codecov:browser": "nyc report --reporter=json && codecov -f coverage/*.json -p ../../../",
     "version": "node ../../../scripts/version-update.js",
-    "tdd": "karma start",
-    "test:browser": "karma start --single-run",
     "watch": "tsc --build --watch tsconfig.json tsconfig.esm.json tsconfig.esnext.json",
     "precompile": "cross-var lerna run version --scope $npm_package_name --include-dependencies",
     "prewatch": "node ../../../scripts/version-update.js",
-    "peer-api-check": "node ../../../scripts/peer-api-check.js"
+    "peer-api-check": "node ../../../scripts/peer-api-check.js",
+    "test": "ava"
+  },
+  "ava": {
+    "extensions": [
+      "ts"
+    ],
+    "require": [
+      "ts-node/register"
+    ],
+    "files": [
+      "!build/**"
+    ]
   },
   "keywords": [
     "fetch",
@@ -91,7 +101,9 @@
     "@opentelemetry/core": "1.19.0",
     "@opentelemetry/instrumentation": "0.46.0",
     "@opentelemetry/sdk-trace-web": "1.19.0",
-    "@opentelemetry/semantic-conventions": "1.19.0"
+    "@opentelemetry/semantic-conventions": "1.19.0",
+    "ava": "^6.0.1",
+    "ts-node": "^10.9.2"
   },
   "homepage": "https://github.com/open-telemetry/opentelemetry-js/tree/main/experimental/packages/opentelemetry-instrumentation-fetch",
   "sideEffects": false
