@@ -35,12 +35,12 @@ import { _globalThis } from '@opentelemetry/core';
 // safe enough
 const OBSERVER_WAIT_TIME_MS = 300;
 
-export interface FetchCustomAttributeFunction {
-  (
-    span: api.Span,
-    request: Request | RequestInit,
-    result: Response | Error
-  ): void;
+export interface FetchCustomReqFunction {
+  (span: api.Span, request: Request | RequestInit): void;
+}
+
+export interface FetchCustomResFunction {
+  (span: api.Span, res: Response | Error): void;
 }
 
 /**
@@ -61,8 +61,10 @@ export interface FetchInstrumentationConfig extends InstrumentationConfig {
    * also not be traced.
    */
   ignoreUrls?: Array<string | RegExp>;
-  /** Function for adding custom attributes on the span */
-  applyCustomAttributesOnSpan?: FetchCustomAttributeFunction;
+  /** Function for adding custom attributes on the span given the request */
+  applyCustomAttributesOnReq?: FetchCustomReqFunction;
+  /** Function for adding custom attributes on the span given the response */
+  applyCustomAttributesOnRes?: FetchCustomResFunction;
   // Ignore adding network events as span events
   ignoreNetworkEvents?: boolean;
 }
@@ -349,7 +351,6 @@ export class FetchInstrumentation extends InstrumentationBase<
       this._addFinalSpanAttributes(span, response);
     }
     if (error) {
-      span.setAttributes({"blipblop": "blip"});
       this._handleSpanWithError(span, error);
     }
 
@@ -382,15 +383,16 @@ export class FetchInstrumentation extends InstrumentationBase<
         if (!createdSpan) {
           return original.apply(this, args);
         }
+        plugin._applyAttributesBeforeFetch(createdSpan, options);
         const spanData = plugin._prepareSpanData(url);
 
         function endSpanOnError(span: api.Span, error: Error) {
-          plugin._applyAttributesAfterFetch(span, options, error);
+          plugin._applyAttributesAfterFetch(span, error);
           plugin._endSpan(span, spanData, undefined, error);
         }
 
         function endSpanOnSuccess(span: api.Span, response: Response) {
-          plugin._applyAttributesAfterFetch(span, options, response);
+          plugin._applyAttributesAfterFetch(span, response);
           if (response.status >= 200 && response.status < 400) {
             plugin._endSpan(span, spanData, response);
           } else {
@@ -474,22 +476,36 @@ export class FetchInstrumentation extends InstrumentationBase<
     };
   }
 
-  private _applyAttributesAfterFetch(
-    span: api.Span,
-    request: Request | RequestInit,
-    result: Response | Error
-  ) {
-    const applyCustomAttributesOnSpan =
-      this._getConfig().applyCustomAttributesOnSpan;
-    if (applyCustomAttributesOnSpan) {
+  private _applyAttributesBeforeFetch(span: api.Span, request: Request | RequestInit) {
+    const applyCustomAttributesOnReq =
+      this._getConfig().applyCustomAttributesOnReq;
+    if (applyCustomAttributesOnReq) {
       safeExecuteInTheMiddle(
-        () => applyCustomAttributesOnSpan(span, request, result),
+        () => applyCustomAttributesOnReq(span, request),
         error => {
           if (!error) {
             return;
           }
 
-          this._diag.error('applyCustomAttributesOnSpan', error);
+          this._diag.error('applyCustomAttributesOnReq', error);
+        },
+        true
+      );
+    }
+  }
+
+  private _applyAttributesAfterFetch(span: api.Span, res: Response | Error) {
+    const applyCustomAttributesOnRes =
+      this._getConfig().applyCustomAttributesOnRes;
+    if (applyCustomAttributesOnRes) {
+      safeExecuteInTheMiddle(
+        () => applyCustomAttributesOnRes(span, res),
+        error => {
+          if (!error) {
+            return;
+          }
+
+          this._diag.error('applyCustomAttributesOnRes', error);
         },
         true
       );
